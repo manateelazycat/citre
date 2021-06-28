@@ -634,6 +634,20 @@ is prefixed by \"citre-\".  Propertized STR is returned."
       (cl-incf i)))
   str)
 
+;;;;; APIs: Save/load elisp object to/from file
+
+(defun citre-print-value-to-file (filename value)
+  "Print VALUE to file FILENAME."
+  (with-temp-file filename
+    (prin1 value (current-buffer))))
+
+(defun citre-read-value-from-file (filename)
+  "Read value from file FILENAME."
+  (with-temp-buffer
+    (insert-file-contents filename)
+    (goto-char (point-min))
+    (read (current-buffer))))
+
 (provide 'citre-util)
 
 ;; Local Variables:

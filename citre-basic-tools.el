@@ -76,6 +76,26 @@
 (put 'citre-enable-imenu-integration 'safe-local-variable #'booleanp)
 (make-variable-buffer-local 'citre-enable-imenu-integration)
 
+;;;;; Options: Generate/update tags file
+
+(defcustom citre-ctags-program nil
+  "The name or path of the ctags program.
+Set this if ctags is not in your PATH, or its name is not
+\"ctags\""
+  :type 'string
+  :group 'citre)
+
+;; TODO: make this extensible and put it in citre-utils.el
+(defcustom citre-ctags-args-file ".citre"
+  "The file to save ctags command arguments.
+When calling `citre-update-tags-file', this file is searched up
+directory hierarchy from the file of current buffer, or from
+`default-directory' in current buffer.  If one is found, then
+ctags is run in the directory containing it, and uses this file
+as the option file."
+  :type 'string
+  :group 'citre)
+
 ;;;;; Options: `citre-jump' related
 
 (defcustom citre-jump-select-definition-function
@@ -125,6 +145,118 @@ completion session can be interrupted when you call
 key by mistake, but that doesn't happen very often."
   :type 'boolean
   :group 'citre)
+
+;;;; Tool: Generate/update tags file
+
+;;;;; Internals
+
+(defun citre--build-ctags-args ()
+  "Return (root . list-of-args) for the ctags command."
+  (let* ((ctags (or citre-ctags-program "ctags"))
+         (root (read-directory-name
+                "Project root (ctags will be run here): "
+                (funcall citre-project-root-function) nil t))
+         (code-dir (read-directory-name
+                    "Dir to scan: "
+                    root nil t))
+         (tags-file (read-file-name
+                     "Tags file: "
+                     root nil nil "tags"))
+         (langs (with-temp-buffer
+                  (call-process ctags nil (current-buffer) nil
+                                "--list-languages")
+                  (split-string (buffer-string) "\n" t)))
+         (langs (completing-read-multiple
+                 "Languages to scan (empty input means using them all): "
+                 langs nil t ""))
+         args)
+    (cond
+     ;; When the dir to scan is the project root, we don't need to specify it.
+     ((equal root code-dir)
+      (setq code-dir nil))
+     ;; When the dir to scan is inside the project, use relative path.
+     ((file-in-directory-p code-dir root)
+      (setq code-dir (file-relative-name code-dir root))))
+    (cond
+     ;; When the tags file is "tags" under project root, we don't need to
+     ;; specify it.
+     ((equal tags-file (concat root "tags"))
+      (setq tags-file nil))
+     ;; When tags file is inside the project, use relative path.
+     ((file-in-directory-p tags-file root)
+      (setq tags-file (file-relative-name tags-file root)))
+     ;; Seems when using ctags by `call-process', ctags doesn't recognize tags
+     ;; file path with `~'.
+     (t
+      (setq tags-file (expand-file-name tags-file))))
+    (when langs
+      (push (format "--languages=%s" (string-join langs ",")) args))
+    (push "--kinds-all=*" args)
+    (push "--fields=*" args)
+    (push "--extras=*" args)
+    ;; Exclude Emacs lock files. TODO: user option for this
+    (push "--exclude=.#*" args)
+    (when tags-file
+      (push "-o" args)
+      (push tags-file args))
+    (push "-R" args)
+    (when code-dir
+      (push code-dir args))
+    (cons root (nreverse args))))
+
+;;;;; Command
+
+(defun citre-update-tags-file ()
+  "Update or create a tags file.
+When you first run this in a project, there'll be a guide letting
+you choose project root, dir to scan, etc.  Citre then calculates
+the arguments in the ctags command, and ask you to save it to an
+args file (decided by `citre-ctags-args-file').  Once this file
+is there, the next time you run `citre-update-tags-file', Citre
+will automatically update the tags file using the arguments in
+it.
+
+You can manually edit the args file to tweak the ctags command by
+your need.
+
+Citre will ask you to create a new tags file if there's not one
+yet, or we don't have an args file for the existing tags file."
+  (interactive)
+  (let* ((ctags (or citre-ctags-program "ctags"))
+         (current-file (or (buffer-file-name) default-directory))
+         (root (locate-dominating-file current-file
+                                       citre-ctags-args-file))
+         (generate-tags-with-options
+          (lambda (dir options)
+            (let ((default-directory dir)
+                  exit-status)
+              (message "Generating tags file at %s..." dir)
+              (with-temp-buffer
+                (setq exit-status
+                      (apply #'call-process
+                             ctags nil (current-buffer) nil
+                             options))
+                (unless (eq exit-status 0)
+                  (user-error "%s exits %s: %s"
+                              ctags exit-status (buffer-string))))
+              (message "%s ran successfully at %s with options:\n %s"
+                       ctags dir (string-join options "\t"))))))
+    (if root
+        (funcall generate-tags-with-options
+                 root
+                 (citre-read-value-from-file citre-ctags-args-file))
+      (let ((tags-file (citre-tags-file-path)))
+        (when (or (null tags-file)
+                  (y-or-n-p
+                   (format "Tags file %s exists but can't be updated.  \
+Create a new one? " tags-file)))
+          (pcase-let* ((`(,root . ,options) (citre--build-ctags-args))
+                       (args-file (concat root citre-ctags-args-file)))
+            (when (y-or-n-p (format "Write ctags args to %s \
+(This allows updating tags file later)? " args-file))
+              (citre-print-value-to-file args-file options))
+            (when (y-or-n-p "Generate tags file now? ")
+              (funcall generate-tags-with-options root options))))))))
 
 ;;;; Tool: Xref integration
 
